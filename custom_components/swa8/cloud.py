@@ -8,10 +8,12 @@ from typing import Any
 import aiohttp
 
 from .const import (
+    API_2FA_VERIFY,
     API_DEVICE_COMMANDS,
     API_DEVICE_DETAIL,
     API_DEVICES,
     API_LOGIN,
+    API_ME,
     DEFAULT_BASE_URL,
 )
 
@@ -20,6 +22,14 @@ _LOGGER = logging.getLogger(__name__)
 
 class SWA8AuthError(Exception):
     """Raised when login fails (wrong email/password)."""
+
+
+class SWA8TwoFactorRequired(SWA8AuthError):
+    """Raised when the account has 2FA and a TOTP code is needed."""
+
+    def __init__(self, email: str) -> None:
+        super().__init__("Two-factor authentication is required")
+        self.email = email
 
 
 class SWA8ApiError(Exception):
@@ -45,8 +55,20 @@ class SWA8CloudClient:
         self._email = email
         self._password = password
 
+    def set_token(self, token: str) -> None:
+        """Store a previously obtained session token."""
+        self._token = token
+
+    @property
+    def token(self) -> str | None:
+        """Return the current session token."""
+        return self._token
+
     async def login(self, email: str | None = None, password: str | None = None) -> str:
-        """Login and store the JWT token. Raises SWA8AuthError on failure."""
+        """Login and store the JWT token. Raises SWA8AuthError on failure.
+
+        If the account has 2FA enabled, raises SWA8TwoFactorRequired instead.
+        """
         email = email or self._email
         password = password or self._password
         if not email or not password:
@@ -57,13 +79,47 @@ class SWA8CloudClient:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload) as resp:
                 data = await self._response_data(resp)
-                if resp.status >= 400 or not isinstance(data, dict) or not data.get("token"):
+                if resp.status >= 400 or not isinstance(data, dict):
                     raise SWA8AuthError(
                         str(data.get("error")) if isinstance(data, dict) else f"Login failed ({resp.status})"
                     )
+                if data.get("needsTwoFactor"):
+                    raise SWA8TwoFactorRequired(email)
+                if not data.get("token"):
+                    raise SWA8AuthError("Login failed: no token returned")
 
         self._token = str(data["token"])
+        self._email = email
+        self._password = password
         return self._token
+
+    async def verify_2fa(self, email: str, code: str) -> str:
+        """Verify the TOTP code and store the JWT token."""
+        url = f"{self.base_url}{API_2FA_VERIFY}"
+        payload = {"email": email, "code": code}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as resp:
+                data = await self._response_data(resp)
+                if resp.status >= 400 or not isinstance(data, dict) or not data.get("token"):
+                    raise SWA8AuthError(
+                        str(data.get("error")) if isinstance(data, dict) else f"2FA verification failed ({resp.status})"
+                    )
+
+        self._token = str(data["token"])
+        self._email = email
+        return self._token
+
+    async def validate_token(self) -> bool:
+        """Check whether the stored token still works with GET /auth/me."""
+        if not self._token:
+            return False
+        try:
+            headers = {"Authorization": f"Bearer {self._token}"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.base_url}{API_ME}", headers=headers) as resp:
+                    return resp.status < 400
+        except aiohttp.ClientError as err:
+            raise SWA8ApiError(str(err)) from err
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> Any:
         """Authenticated request with one automatic re-login on 401/403."""

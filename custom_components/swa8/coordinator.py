@@ -6,10 +6,12 @@ import logging
 from datetime import timedelta
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .cloud import SWA8ApiError, SWA8CloudClient
+from .cloud import SWA8ApiError, SWA8AuthError, SWA8CloudClient
 from .const import DEFAULT_AC_TEMP, DOMAIN, NUM_RELAYS
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,13 +21,18 @@ class SWA8Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Fetch all account devices and their states from the SWA8 platform."""
 
     def __init__(
-        self, hass: HomeAssistant, cloud: SWA8CloudClient, scan_interval: int
+        self,
+        hass: HomeAssistant,
+        cloud: SWA8CloudClient,
+        scan_interval: int,
+        config_entry: ConfigEntry,
     ) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
             update_interval=timedelta(seconds=scan_interval),
+            config_entry=config_entry,
         )
         self.cloud = cloud
 
@@ -100,6 +107,8 @@ class SWA8Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 states[key] = state if isinstance(state, dict) else {}
 
             return {"devices": devices, "states": states}
+        except SWA8AuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
         except SWA8ApiError as err:
             raise UpdateFailed(f"SWA8 API error: {err}") from err
         except Exception as err:  # noqa: BLE001

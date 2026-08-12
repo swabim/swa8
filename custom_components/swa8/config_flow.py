@@ -20,11 +20,12 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .cloud import SWA8AuthError, SWA8CloudClient
+from .cloud import SWA8AuthError, SWA8CloudClient, SWA8TwoFactorRequired
 from .const import (
     CONF_EMAIL,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_TOKEN,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MIN_SCAN_INTERVAL,
@@ -39,6 +40,12 @@ STEP_USER_SCHEMA = vol.Schema(
     }
 )
 
+STEP_2FA_SCHEMA = vol.Schema(
+    {
+        vol.Required("code"): str,
+    }
+)
+
 
 class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot reach the SWA8 platform."""
@@ -50,16 +57,47 @@ class SWA8ConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
     MINOR_VERSION = 1
 
-    async def _validate_login(self, email: str, password: str) -> None:
-        client = SWA8CloudClient()
+    def __init__(self) -> None:
+        """Init the config flow."""
+        self._email: str | None = None
+        self._password: str | None = None
+        self._client: SWA8CloudClient | None = None
+
+    def _remember_credentials(self, email: str, password: str) -> None:
+        """Remember email/password while the flow spans multiple steps."""
+        self._email = email
+        self._password = password
+
+    def _entry_data(self, token: str | None) -> dict[str, Any]:
+        """Build config entry data including the session token."""
+        data: dict[str, Any] = {CONF_EMAIL: self._email, CONF_PASSWORD: self._password}
+        if token:
+            data[CONF_TOKEN] = token
+        return data
+
+    async def _finish_login(self, client: SWA8CloudClient) -> bool:
+        """Validate the session works by fetching devices. Returns True on success."""
         try:
-            await client.login(email, password)
             await client.get_devices()
-        except SWA8AuthError as err:
-            raise InvalidAuth from err
+            return True
+        except SWA8AuthError:
+            return False
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("SWA8 connect failed: %s", err)
-            raise CannotConnect from err
+            return False
+
+    async def _validate_login(self, email: str, password: str) -> str | None:
+        """Validate login. Returns the token, or raises TwoFactorRequired."""
+        client = SWA8CloudClient()
+        try:
+            token = await client.login(email, password)
+        except SWA8TwoFactorRequired:
+            self._client = client
+            raise
+        if not await self._finish_login(client):
+            raise SWA8AuthError("Login succeeded but no devices were returned")
+        self._client = client
+        return token
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -69,29 +107,59 @@ class SWA8ConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             email = user_input[CONF_EMAIL].strip()
             password = user_input[CONF_PASSWORD]
+            self._remember_credentials(email, password)
             try:
                 await self._validate_login(email, password)
-            except InvalidAuth:
+            except SWA8TwoFactorRequired:
+                return await self.async_step_2fa()
+            except SWA8AuthError:
                 errors["base"] = "invalid_auth"
-            except CannotConnect:
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("SWA8 connect failed: %s", err)
                 errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Unexpected SWA8 login error")
-                errors["base"] = "unknown"
             else:
                 await self.async_set_unique_id(f"swa8_account_{email.lower()}")
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=email,
-                    data={
-                        CONF_EMAIL: email,
-                        CONF_PASSWORD: password,
-                    },
+                    data=self._entry_data(self._client.token if self._client else None),
                 )
 
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_SCHEMA,
+            errors=errors,
+        )
+
+    async def async_step_2fa(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """2FA step: ask for the TOTP code when the account requires it."""
+        errors: dict[str, str] = {}
+        email = self._email
+        if user_input is not None and email is not None and self._client is not None:
+            code = user_input.get("code", "").strip()
+            try:
+                token = await self._client.verify_2fa(email, code)
+            except SWA8AuthError:
+                errors["base"] = "invalid_2fa_code"
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("SWA8 connect failed: %s", err)
+                errors["base"] = "cannot_connect"
+            else:
+                if not await self._finish_login(self._client):
+                    errors["base"] = "cannot_connect"
+                else:
+                    await self.async_set_unique_id(f"swa8_account_{email.lower()}")
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=email,
+                        data=self._entry_data(token),
+                    )
+
+        return self.async_show_form(
+            step_id="2fa",
+            data_schema=STEP_2FA_SCHEMA,
             errors=errors,
         )
 
@@ -113,23 +181,20 @@ class SWA8ConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             email = user_input.get(CONF_EMAIL, entry.data[CONF_EMAIL]).strip()
             password = user_input[CONF_PASSWORD]
+            self._remember_credentials(email, password)
             try:
                 await self._validate_login(email, password)
-            except InvalidAuth:
+            except SWA8TwoFactorRequired:
+                return await self.async_step_2fa_reauth()
+            except SWA8AuthError:
                 errors["base"] = "invalid_auth"
-            except CannotConnect:
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("SWA8 connect failed: %s", err)
                 errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Unexpected SWA8 login error")
-                errors["base"] = "unknown"
             else:
                 return self.async_update_reload_and_abort(
                     entry,
-                    data={
-                        **entry.data,
-                        CONF_EMAIL: email,
-                        CONF_PASSWORD: password,
-                    },
+                    data=self._entry_data(self._client.token if self._client else None),
                 )
 
         data_schema = vol.Schema(
@@ -141,6 +206,39 @@ class SWA8ConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=data_schema,
+            errors=errors,
+        )
+
+    async def async_step_2fa_reauth(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """2FA step during re-authentication."""
+        errors: dict[str, str] = {}
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:
+            return self.async_abort(reason="not_configured")
+        email = self._email
+        if user_input is not None and email is not None and self._client is not None:
+            code = user_input.get("code", "").strip()
+            try:
+                token = await self._client.verify_2fa(email, code)
+            except SWA8AuthError:
+                errors["base"] = "invalid_2fa_code"
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("SWA8 connect failed: %s", err)
+                errors["base"] = "cannot_connect"
+            else:
+                if not await self._finish_login(self._client):
+                    errors["base"] = "cannot_connect"
+                else:
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        data=self._entry_data(token),
+                    )
+
+        return self.async_show_form(
+            step_id="2fa_reauth",
+            data_schema=STEP_2FA_SCHEMA,
             errors=errors,
         )
 
@@ -160,6 +258,27 @@ class SWA8OptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self.config_entry = config_entry
+        self._email: str | None = None
+        self._password: str | None = None
+        self._scan_interval: int | None = None
+        self._client: SWA8CloudClient | None = None
+
+    def _remember_credentials(self, email: str, password: str, scan_interval: int) -> None:
+        """Remember values while the options flow spans multiple steps."""
+        self._email = email
+        self._password = password
+        self._scan_interval = scan_interval
+
+    def _options_data(self, token: str | None) -> dict[str, Any]:
+        """Build options data including the session token."""
+        data: dict[str, Any] = {
+            CONF_EMAIL: self._email,
+            CONF_PASSWORD: self._password,
+            CONF_SCAN_INTERVAL: self._scan_interval,
+        }
+        if token:
+            data[CONF_TOKEN] = token
+        return data
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -170,24 +289,30 @@ class SWA8OptionsFlow(OptionsFlow):
             email = user_input[CONF_EMAIL].strip()
             password = user_input[CONF_PASSWORD]
             scan_interval = user_input[CONF_SCAN_INTERVAL]
+            self._remember_credentials(email, password, scan_interval)
 
             client = SWA8CloudClient()
+            self._client = client
             try:
-                await client.login(email, password)
+                token = await client.login(email, password)
+            except SWA8TwoFactorRequired:
+                return await self.async_step_2fa()
             except SWA8AuthError:
                 errors["base"] = "invalid_auth"
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("SWA8 connect failed: %s", err)
                 errors["base"] = "cannot_connect"
             else:
-                return self.async_create_entry(
-                    title="",
-                    data={
-                        CONF_EMAIL: email,
-                        CONF_PASSWORD: password,
-                        CONF_SCAN_INTERVAL: scan_interval,
-                    },
-                )
+                try:
+                    await client.get_devices()
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("SWA8 connect failed: %s", err)
+                    errors["base"] = "cannot_connect"
+                else:
+                    return self.async_create_entry(
+                        title="",
+                        data=self._options_data(token),
+                    )
 
         entry = self.config_entry
         data_schema = vol.Schema(
@@ -205,5 +330,38 @@ class SWA8OptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=data_schema,
+            errors=errors,
+        )
+
+    async def async_step_2fa(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """2FA step inside the options flow."""
+        errors: dict[str, str] = {}
+        email = self._email
+        if user_input is not None and email is not None and self._client is not None:
+            code = user_input.get("code", "").strip()
+            try:
+                token = await self._client.verify_2fa(email, code)
+            except SWA8AuthError:
+                errors["base"] = "invalid_2fa_code"
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("SWA8 connect failed: %s", err)
+                errors["base"] = "cannot_connect"
+            else:
+                try:
+                    await self._client.get_devices()
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("SWA8 connect failed: %s", err)
+                    errors["base"] = "cannot_connect"
+                else:
+                    return self.async_create_entry(
+                        title="",
+                        data=self._options_data(token),
+                    )
+
+        return self.async_show_form(
+            step_id="2fa",
+            data_schema=STEP_2FA_SCHEMA,
             errors=errors,
         )

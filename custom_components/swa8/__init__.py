@@ -13,11 +13,17 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
-from .cloud import SWA8ApiError, SWA8AuthError, SWA8CloudClient
+from .cloud import (
+    SWA8ApiError,
+    SWA8AuthError,
+    SWA8CloudClient,
+    SWA8TwoFactorRequired,
+)
 from .const import (
     CONF_EMAIL,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_TOKEN,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     PLATFORMS,
@@ -31,13 +37,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up SWA8 from a config entry."""
     email = entry.options.get(CONF_EMAIL, entry.data[CONF_EMAIL])
     password = entry.options.get(CONF_PASSWORD, entry.data.get(CONF_PASSWORD))
+    token = entry.options.get(CONF_TOKEN, entry.data.get(CONF_TOKEN))
     if not email or not password:
         raise ConfigEntryAuthFailed("Credentials are missing, re-authenticate the integration")
 
     cloud = SWA8CloudClient()
     cloud.set_credentials(email, password)
+    if token:
+        cloud.set_token(token)
     try:
-        await cloud.login()
+        if token and await cloud.validate_token():
+            pass
+        else:
+            await cloud.login()
+    except SWA8TwoFactorRequired as err:
+        raise ConfigEntryAuthFailed(str(err)) from err
     except SWA8AuthError as err:
         raise ConfigEntryAuthFailed(str(err)) from err
     except SWA8ApiError as err:
@@ -46,7 +60,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     scan_interval = entry.options.get(
         CONF_SCAN_INTERVAL, entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     )
-    coordinator = SWA8Coordinator(hass, cloud, scan_interval)
+    coordinator = SWA8Coordinator(hass, cloud, scan_interval, entry)
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
