@@ -9,6 +9,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.device_registry import async_get as async_get_dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .cloud import SWA8ApiError, SWA8AuthError, SWA8CloudClient
@@ -106,6 +107,7 @@ class SWA8Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 state = config.get("state", {}) if isinstance(config, dict) else {}
                 states[key] = state if isinstance(state, dict) else {}
 
+            self._cleanup_removed_devices(set(devices))
             return {"devices": devices, "states": states}
         except SWA8AuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -113,3 +115,24 @@ class SWA8Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(f"SWA8 API error: {err}") from err
         except Exception as err:  # noqa: BLE001
             raise UpdateFailed(f"Error communicating with SWA8: {err}") from err
+
+    def _cleanup_removed_devices(self, current_keys: set[str]) -> None:
+        """Remove HA devices that no longer exist on the SWA8 account.
+
+        Called after every successful refresh so devices deleted from the
+        platform are also removed from the Home Assistant device registry.
+        """
+        if not current_keys:
+            return
+        lower_keys = {key.lower() for key in current_keys}
+        dr = async_get_dr(self.hass)
+        for device in dr.devices.values():
+            if self.config_entry.entry_id not in device.config_entries:
+                continue
+            for domain, identifier in device.identifiers:
+                if domain != DOMAIN or not identifier.startswith("swa8_"):
+                    continue
+                if identifier[5:].lower() not in lower_keys:
+                    _LOGGER.info("Removing SWA8 device %s (no longer on the account)", identifier[5:])
+                    dr.async_remove_device(device.id)
+                break
