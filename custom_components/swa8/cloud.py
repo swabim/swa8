@@ -170,12 +170,12 @@ class SWA8CloudClient:
     async def get_devices(self) -> list[dict[str, Any]]:
         """Return devices linked to the account.
 
-        When owner_only is enabled, filters out shared devices
-        (devices whose ``shared`` flag is ``true``).  The API returns
-        ``shared: false`` for owned devices and ``shared: true`` for
-        devices that are only shared with the user.
+        Passes ``?platform=home_assistant`` so the backend filters by
+        platform sharing settings.  When owner_only is also enabled,
+        shared devices are additionally removed client-side.
         """
-        data = await self._request("GET", f"{self.base_url}{API_DEVICES}")
+        url = f"{self.base_url}{API_DEVICES}?platform=home_assistant"
+        data = await self._request("GET", url)
         if isinstance(data, list):
             raw = data
         elif isinstance(data, dict):
