@@ -49,6 +49,7 @@ class SWA8CloudClient:
         self._token: str | None = None
         self._email: str | None = None
         self._password: str | None = None
+        self._owner_only: bool = False
 
     def set_credentials(self, email: str, password: str) -> None:
         """Store credentials used for automatic re-login."""
@@ -58,6 +59,10 @@ class SWA8CloudClient:
     def set_token(self, token: str) -> None:
         """Store a previously obtained session token."""
         self._token = token
+
+    def set_owner_only(self, owner_only: bool) -> None:
+        """When True, only return devices whose owner matches the account."""
+        self._owner_only = owner_only
 
     @property
     def token(self) -> str | None:
@@ -163,14 +168,42 @@ class SWA8CloudClient:
         return f"SWA8 API error (HTTP {status})"
 
     async def get_devices(self) -> list[dict[str, Any]]:
-        """Return all devices linked to the account (owned + shared)."""
+        """Return all devices linked to the account.
+
+        When owner_only is enabled, filters out devices whose owner
+        does not match the authenticated user's email.
+        """
         data = await self._request("GET", f"{self.base_url}{API_DEVICES}")
         if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
+            raw = data
+        elif isinstance(data, dict):
             devices = data.get("devices", [])
-            return list(devices) if isinstance(devices, list) else []
-        return []
+            raw = list(devices) if isinstance(devices, list) else []
+        else:
+            raw = []
+
+        if not self._owner_only or not self._email:
+            return raw
+
+        owner_lower = self._email.lower()
+        filtered = []
+        for dev in raw:
+            if not isinstance(dev, dict):
+                continue
+            dev_owner = (
+                dev.get("ownerEmail")
+                or dev.get("owner_email")
+                or dev.get("accountEmail")
+                or dev.get("account_email")
+            )
+            if dev_owner and str(dev_owner).lower() != owner_lower:
+                _LOGGER.debug(
+                    "Skipping device %s (owned by %s, not %s)",
+                    dev.get("deviceKey"), dev_owner, self._email,
+                )
+                continue
+            filtered.append(dev)
+        return filtered
 
     async def get_device(self, key: str) -> dict[str, Any]:
         """Return full device detail: state + online + firmware + config."""

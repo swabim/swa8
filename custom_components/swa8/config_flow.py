@@ -23,6 +23,7 @@ from homeassistant.exceptions import HomeAssistantError
 from .cloud import SWA8AuthError, SWA8CloudClient, SWA8TwoFactorRequired
 from .const import (
     CONF_EMAIL,
+    CONF_OWNER_ONLY,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
     CONF_TOKEN,
@@ -263,11 +264,12 @@ class SWA8OptionsFlow(OptionsFlow):
         self._scan_interval: int | None = None
         self._client: SWA8CloudClient | None = None
 
-    def _remember_credentials(self, email: str, password: str, scan_interval: int) -> None:
+    def _remember_credentials(self, email: str, password: str, scan_interval: int, owner_only: bool) -> None:
         """Remember values while the options flow spans multiple steps."""
         self._email = email
         self._password = password
         self._scan_interval = scan_interval
+        self._owner_only = owner_only
 
     def _options_data(self, token: str | None) -> dict[str, Any]:
         """Build options data including the session token."""
@@ -275,6 +277,7 @@ class SWA8OptionsFlow(OptionsFlow):
             CONF_EMAIL: self._email,
             CONF_PASSWORD: self._password,
             CONF_SCAN_INTERVAL: self._scan_interval,
+            CONF_OWNER_ONLY: self._owner_only,
         }
         if token:
             data[CONF_TOKEN] = token
@@ -289,7 +292,8 @@ class SWA8OptionsFlow(OptionsFlow):
             email = user_input[CONF_EMAIL].strip()
             password = user_input[CONF_PASSWORD]
             scan_interval = user_input[CONF_SCAN_INTERVAL]
-            self._remember_credentials(email, password, scan_interval)
+            owner_only = user_input.get(CONF_OWNER_ONLY, True)
+            self._remember_credentials(email, password, scan_interval, owner_only)
 
             client = SWA8CloudClient()
             self._client = client
@@ -325,6 +329,12 @@ class SWA8OptionsFlow(OptionsFlow):
                         CONF_SCAN_INTERVAL, entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
                     ),
                 ): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL)),
+                vol.Optional(
+                    CONF_OWNER_ONLY,
+                    default=entry.options.get(
+                        CONF_OWNER_ONLY, entry.data.get(CONF_OWNER_ONLY, True)
+                    ),
+                ): bool,
             }
         )
         return self.async_show_form(

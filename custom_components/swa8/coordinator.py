@@ -9,6 +9,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import async_get as async_get_dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -120,19 +121,33 @@ class SWA8Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Remove HA devices that no longer exist on the SWA8 account.
 
         Called after every successful refresh so devices deleted from the
-        platform are also removed from the Home Assistant device registry.
+        platform are also removed from the Home Assistant device registry
+        and all their associated entities.
         """
         if not current_keys:
             return
         lower_keys = {key.lower() for key in current_keys}
         dr = async_get_dr(self.hass)
-        for device in dr.devices.values():
+        er_reg = er.async_get(self.hass)
+        for device in list(dr.devices.values()):
             if self.config_entry.entry_id not in device.config_entries:
                 continue
             for domain, identifier in device.identifiers:
                 if domain != DOMAIN or not identifier.startswith("swa8_"):
                     continue
-                if identifier[5:].lower() not in lower_keys:
-                    _LOGGER.info("Removing SWA8 device %s (no longer on the account)", identifier[5:])
+                device_key = identifier[5:]
+                if device_key.lower() not in lower_keys:
+                    _LOGGER.info(
+                        "Removing SWA8 device %s (no longer on the account)",
+                        device_key,
+                    )
+                    # Remove associated entities first
+                    entity_ids = er.async_entries_for_device(
+                        er_reg, device.id, include_disabled_entities=True
+                    )
+                    for entity_entry in entity_ids:
+                        _LOGGER.debug("Removing entity %s", entity_entry.entity_id)
+                        er_reg.async_remove(entity_entry.entity_id)
+                    # Remove the device itself
                     dr.async_remove_device(device.id)
                 break

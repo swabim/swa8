@@ -51,7 +51,8 @@
         "data": {
           "email": "Email",
           "password": "Password",
-          "scan_interval": "Polling interval (seconds, min 15)"
+          "scan_interval": "Polling interval (seconds, min 15)",
+          "owner_only": "Only show devices owned by this account"
         }
       }
     }

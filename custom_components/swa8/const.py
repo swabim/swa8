@@ -9,6 +9,7 @@ CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_TOKEN = "token"
+CONF_OWNER_ONLY = "owner_only"
 
 DEFAULT_BASE_URL = "https://mm.swabim.com"
 DEFAULT_SCAN_INTERVAL = 60
