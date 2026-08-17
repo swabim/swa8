@@ -45,7 +45,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     cloud = SWA8CloudClient()
     cloud.set_credentials(email, password)
     owner_only = entry.options.get(
-        CONF_OWNER_ONLY, entry.data.get(CONF_OWNER_ONLY, True)
+        CONF_OWNER_ONLY, entry.data.get(CONF_OWNER_ONLY, False)
     )
     cloud.set_owner_only(owner_only)
     if token:

@@ -46,13 +46,22 @@
   "options": {
     "step": {
       "init": {
-        "title": "SWA8 options",
-        "description": "Update your account credentials and how often Home Assistant polls the platform.",
+        "title": "SWA8 Options",
+        "description": "Update your account credentials and polling interval. Use 'Mirror Link' to manage and unlink mirrors.",
         "data": {
           "email": "Email",
           "password": "Password",
           "scan_interval": "Polling interval (seconds, min 15)",
-          "owner_only": "Only show devices owned by this account"
+          "owner_only": "Only show devices owned by this account",
+          "action": "Quick Actions"
+        }
+      },
+      "mirror_link": {
+        "title": "Mirror Link",
+        "description": "All mirrors linked to your account ({device_count} found). Select mirrors to unlink, or unlink all.",
+        "data": {
+          "devices_to_unlink": "Select mirrors to unlink",
+          "mirror_action": "Action"
         }
       }
     }

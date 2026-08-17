@@ -214,6 +214,29 @@ class SWA8CloudClient:
             "POST", f"{self.base_url}{API_DEVICE_COMMANDS.format(key=key)}", json=command
         )
 
+    async def get_all_devices(self) -> list[dict[str, Any]]:
+        """Return ALL devices on the account without any filtering.
+
+        Used by the Mirror Link page to show every device including
+        shared ones and potential duplicates.
+        """
+        data = await self._request("GET", f"{self.base_url}{API_DEVICES}")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            devices = data.get("devices", [])
+            return list(devices) if isinstance(devices, list) else []
+        return []
+
+    async def unlink_device(self, key: str) -> bool:
+        """Unlink a single device from the account.
+
+        Returns True on success.
+        """
+        url = f"{self.base_url}/api/devices/{key}/unlink"
+        await self._request("DELETE", url)
+        return True
+
     async def unlink_all_devices(self) -> int:
         """Unlink every device from the authenticated account.
 

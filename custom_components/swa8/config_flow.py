@@ -19,6 +19,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import selector as sel
 
 from .cloud import SWA8AuthError, SWA8CloudClient, SWA8TwoFactorRequired
 from .const import (
@@ -255,7 +256,7 @@ class InvalidAuth(HomeAssistantError):
 
 
 class SWA8OptionsFlow(OptionsFlow):
-    """Handle options: credentials + polling interval."""
+    """Handle options: credentials + polling interval + mirror link."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self.config_entry = config_entry
@@ -283,16 +284,39 @@ class SWA8OptionsFlow(OptionsFlow):
             data[CONF_TOKEN] = token
         return data
 
+    async def _get_client(self) -> SWA8CloudClient:
+        """Build an authenticated client from the current entry."""
+        client = SWA8CloudClient()
+        email = self._email or self.config_entry.options.get(
+            CONF_EMAIL, self.config_entry.data.get(CONF_EMAIL, "")
+        )
+        password = self._password or self.config_entry.options.get(
+            CONF_PASSWORD, self.config_entry.data.get(CONF_PASSWORD, "")
+        )
+        token = self.config_entry.options.get(
+            CONF_TOKEN, self.config_entry.data.get(CONF_TOKEN)
+        )
+        client.set_credentials(email, password)
+        if token:
+            client.set_token(token)
+        if not await client.validate_token():
+            await client.login()
+        return client
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Manage the options."""
         errors: dict[str, str] = {}
         if user_input is not None:
+            action = user_input.get("action")
+            if action == "mirror_link":
+                return await self.async_step_mirror_link()
+
             email = user_input[CONF_EMAIL].strip()
             password = user_input[CONF_PASSWORD]
             scan_interval = user_input[CONF_SCAN_INTERVAL]
-            owner_only = user_input.get(CONF_OWNER_ONLY, True)
+            owner_only = user_input.get(CONF_OWNER_ONLY, False)
             self._remember_credentials(email, password, scan_interval, owner_only)
 
             client = SWA8CloudClient()
@@ -332,15 +356,106 @@ class SWA8OptionsFlow(OptionsFlow):
                 vol.Optional(
                     CONF_OWNER_ONLY,
                     default=entry.options.get(
-                        CONF_OWNER_ONLY, entry.data.get(CONF_OWNER_ONLY, True)
+                        CONF_OWNER_ONLY, entry.data.get(CONF_OWNER_ONLY, False)
                     ),
                 ): bool,
+                vol.Optional("action"): sel.SelectSelector(
+                    sel.SelectSelectorConfig(
+                        options=[
+                            sel.SelectOptionDict(value="mirror_link", label="Mirror Link - Manage Mirrors"),
+                        ],
+                    )
+                ),
             }
         )
         return self.async_show_form(
             step_id="init",
             data_schema=data_schema,
             errors=errors,
+        )
+
+    async def async_step_mirror_link(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Mirror Link: show all devices and allow unlinking."""
+        errors: dict[str, str] = {}
+
+        try:
+            client = await self._get_client()
+            all_devices = await client.get_all_devices()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("SWA8 connect failed: %s", err)
+            errors["base"] = "cannot_connect"
+            all_devices = []
+
+        if user_input is not None:
+            action = user_input.get("mirror_action", "")
+
+            if action == "unlink_all" and all_devices:
+                try:
+                    await client.unlink_all_devices()
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("SWA8 unlink all failed: %s", err)
+                    errors["base"] = "cannot_connect"
+                else:
+                    return self.hass.config_entries.async_reload(
+                        self.config_entry.entry_id
+                    )
+
+            elif action == "unlink_selected":
+                selected = user_input.get("devices_to_unlink", [])
+                if isinstance(selected, str):
+                    selected = [selected]
+                for device_key in selected:
+                    try:
+                        await client.unlink_device(device_key)
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning("Failed to unlink %s: %s", device_key, err)
+                return self.hass.config_entries.async_reload(
+                    self.config_entry.entry_id
+                )
+
+        options: list[dict[str, str]] = []
+        for dev in all_devices:
+            key = dev.get("deviceKey", "")
+            name = dev.get("name", key)
+            shared_tag = " [Shared]" if dev.get("shared") else ""
+            options.append(
+                sel.SelectOptionDict(
+                    value=key,
+                    label=f"{name} ({key}){shared_tag}",
+                )
+            )
+
+        data_schema = vol.Schema({})
+
+        if options:
+            data_schema = vol.Schema(
+                {
+                    vol.Optional("devices_to_unlink"): sel.SelectSelector(
+                        sel.SelectSelectorConfig(
+                            options=options,
+                            multiple=True,
+                        )
+                    ),
+                    vol.Optional("mirror_action"): sel.SelectSelector(
+                        sel.SelectSelectorConfig(
+                            options=[
+                                sel.SelectOptionDict(value="unlink_selected", label="Unlink Selected"),
+                                sel.SelectOptionDict(value="unlink_all", label="Unlink ALL Mirrors"),
+                            ],
+                        )
+                    ),
+                }
+            )
+
+        return self.async_show_form(
+            step_id="mirror_link",
+            data_schema=data_schema,
+            errors=errors,
+            description_placeholders={
+                "device_count": str(len(all_devices)),
+            },
         )
 
     async def async_step_2fa(
