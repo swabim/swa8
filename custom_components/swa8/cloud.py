@@ -168,10 +168,12 @@ class SWA8CloudClient:
         return f"SWA8 API error (HTTP {status})"
 
     async def get_devices(self) -> list[dict[str, Any]]:
-        """Return all devices linked to the account.
+        """Return devices linked to the account.
 
-        When owner_only is enabled, filters out devices whose owner
-        does not match the authenticated user's email.
+        When owner_only is enabled, filters out shared devices
+        (devices whose ``shared`` flag is ``true``).  The API returns
+        ``shared: false`` for owned devices and ``shared: true`` for
+        devices that are only shared with the user.
         """
         data = await self._request("GET", f"{self.base_url}{API_DEVICES}")
         if isinstance(data, list):
@@ -182,24 +184,17 @@ class SWA8CloudClient:
         else:
             raw = []
 
-        if not self._owner_only or not self._email:
+        if not self._owner_only:
             return raw
 
-        owner_lower = self._email.lower()
         filtered = []
         for dev in raw:
             if not isinstance(dev, dict):
                 continue
-            dev_owner = (
-                dev.get("ownerEmail")
-                or dev.get("owner_email")
-                or dev.get("accountEmail")
-                or dev.get("account_email")
-            )
-            if dev_owner and str(dev_owner).lower() != owner_lower:
+            if dev.get("shared") is True:
                 _LOGGER.debug(
-                    "Skipping device %s (owned by %s, not %s)",
-                    dev.get("deviceKey"), dev_owner, self._email,
+                    "Skipping shared device %s (%s)",
+                    dev.get("deviceKey"), dev.get("name"),
                 )
                 continue
             filtered.append(dev)

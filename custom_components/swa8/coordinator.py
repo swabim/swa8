@@ -93,6 +93,7 @@ class SWA8Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             states: dict[str, dict[str, Any]] = {}
 
             raw_devices = await self.cloud.get_devices()
+            _LOGGER.debug("SWA8 API returned %d device(s)", len(raw_devices))
             for dev in raw_devices:
                 key = dev.get("deviceKey")
                 if not key:
@@ -123,31 +124,37 @@ class SWA8Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         Called after every successful refresh so devices deleted from the
         platform are also removed from the Home Assistant device registry
         and all their associated entities.
+
+        Also cleans up orphaned SWA8 devices that belong to a different
+        (possibly deleted) config entry.
         """
         if not current_keys:
             return
         lower_keys = {key.lower() for key in current_keys}
         dr = async_get_dr(self.hass)
         er_reg = er.async_get(self.hass)
+        active_entry_ids = {
+            entry.entry_id
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+        }
         for device in list(dr.devices.values()):
-            if self.config_entry.entry_id not in device.config_entries:
-                continue
             for domain, identifier in device.identifiers:
                 if domain != DOMAIN or not identifier.startswith("swa8_"):
                     continue
                 device_key = identifier[5:]
-                if device_key.lower() not in lower_keys:
+                is_mine = self.config_entry.entry_id in device.config_entries
+                is_orphaned = not device.config_entries.intersection(active_entry_ids)
+                if device_key.lower() not in lower_keys or is_orphaned:
+                    reason = "orphaned (no active config entry)" if is_orphaned else "no longer on the account"
                     _LOGGER.info(
-                        "Removing SWA8 device %s (no longer on the account)",
-                        device_key,
+                        "Removing SWA8 device %s (%s)",
+                        device_key, reason,
                     )
-                    # Remove associated entities first
                     entity_ids = er.async_entries_for_device(
                         er_reg, device.id, include_disabled_entities=True
                     )
                     for entity_entry in entity_ids:
                         _LOGGER.debug("Removing entity %s", entity_entry.entity_id)
                         er_reg.async_remove(entity_entry.entity_id)
-                    # Remove the device itself
                     dr.async_remove_device(device.id)
                 break
