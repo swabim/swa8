@@ -213,3 +213,14 @@ class SWA8CloudClient:
         await self._request(
             "POST", f"{self.base_url}{API_DEVICE_COMMANDS.format(key=key)}", json=command
         )
+
+    async def unlink_all_devices(self) -> int:
+        """Unlink every device from the authenticated account.
+
+        Returns the number of devices unlinked.
+        """
+        url = f"{self.base_url}/api/devices/unlink-all"
+        data = await self._request("DELETE", url)
+        count = data.get("unlinked", 0) if isinstance(data, dict) else 0
+        _LOGGER.info("Unlinked %d device(s) from the SWA8 account", count)
+        return count
